@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dragon Cursor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #d8d4cc; cursor: none; }
+  svg#screen { display: block; width: 100vw; height: 100vh; }
+
+  /* ── SCORE DISPLAY ── */
+  #score-display {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 28px;
+    font-weight: bold;
+    color: #2a2018;
+    letter-spacing: 4px;
+    background: rgba(214, 209, 199, 0.75);
+    padding: 8px 28px;
+    border-radius: 40px;
+    border: 2px solid rgba(42, 32, 24, 0.18);
+    pointer-events: none;        /* never blocks mouse */
+    user-select: none;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+<!-- ── SCORE DISPLAY (sits above SVG) ── -->
+<div id="score-display">Score - 000</div>
+
+<svg id="screen" xmlns="http://www.w3.org/2000/svg"></svg>
+<script>
+"use strict";
+
+const svg = document.getElementById("screen");
+const NS  = "http://www.w3.org/2000/svg";
+
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function add(p, c) { p.appendChild(c); return c; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+// bell curve: 0 at edges, 1 at peak position pk (0..1)
+function bell(t, pk) { return clamp(t < pk ? t / pk : (1 - t) / (1 - pk), 0, 1); }
+
+// ── viewport ───────────────────────────────────────────────────────────────
+let W = window.innerWidth, H = window.innerHeight;
+svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+window.addEventListener("resize", () => {
+  W = window.innerWidth; H = window.innerHeight;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+});
+
+// ── pointer ────────────────────────────────────────────────────────────────
+const ptr = { x: W / 2, y: H / 2 };
+window.addEventListener("pointermove", e => { ptr.x = e.clientX; ptr.y = e.clientY; });
+
+// ── spine parameters ───────────────────────────────────────────────────────
+const SPINE_N = 60;   // total vertebrae count
+const SPINE_D = 15;   // spacing between vertebrae
+
+const spine = Array.from({ length: SPINE_N }, (_, i) => ({
+  x: W / 2 + i * SPINE_D,
+  y: H / 2,
+  a: 0   // angle in radians
+}));
+
+// ── layer groups (back to front) ────────────────────────────────────────────
+const gFins  = add(svg, el("g", {}));   // long feathery fin strokes (background)
+const gBones = add(svg, el("g", {}));   // crescent vertebrae shapes
+const gHead  = add(svg, el("g", {}));   // head
+
+// ── SCORE ──────────────────────────────────────────────────────────────────
+// Keeps track of how many targets the dragon head has eaten.
+let score = 0;
+const scoreEl = document.getElementById("score-display");
+
+// Pad score to always show 3 digits: 0 → "000", 7 → "007", 42 → "042"
+function updateScoreDisplay() {
+  scoreEl.textContent = "Score - " + String(score).padStart(3, "0");
+}
+
+// ── HUMAN TARGET ───────────────────────────────────────────────────────────
+// A small red stick-figure human. When the dragon head touches it:
+//   1. A "death" animation plays (figure falls, spins, fades out)
+//   2. Score increments
+//   3. A fresh human appears at a new random spot
+// The human also auto-repositions every 500ms if not eaten.
+
+const MARGIN  = 60;    // keep human this many px from screen edges
+const TARGET_R = 18;   // collision hitbox radius (matches figure size)
+const HEAD_R   = 20;   // dragon head hitbox radius
+
+// ── Human figure built from SVG primitives ─────────────────────────────────
+// All parts live inside gHuman so we can transform the whole group at once.
+// Structure: head (circle) + body (line) + arms (line) + legs (two lines)
+
+const gTarget = add(svg, el("g", {}));   // layer above dragon head
+
+// The "alive" human group
+const gHuman = add(gTarget, el("g", { opacity: "1" }));
+
+// Head
+const hHead = add(gHuman, el("circle", {
+  cx: "0", cy: "-22",
+  r: "7",
+  fill: "#cc1010",
+  stroke: "#ff4444",
+  "stroke-width": "1.5"
+}));
+
+// Body (torso line: neck to hips)
+const hBody = add(gHuman, el("line", {
+  x1: "0", y1: "-15",
+  x2: "0", y2: "5",
+  stroke: "#cc1010", "stroke-width": "3", "stroke-linecap": "round"
+}));
+
+// Arms (single line through shoulders)
+const hArms = add(gHuman, el("line", {
+  x1: "-12", y1: "-8",
+  x2: "12",  y2: "-8",
+  stroke: "#cc1010", "stroke-width": "3", "stroke-linecap": "round"
+}));
+
+// Left leg
+const hLegL = add(gHuman, el("line", {
+  x1: "0", y1: "5",
+  x2: "-9", y2: "20",
+  stroke: "#cc1010", "stroke-width": "3", "stroke-linecap": "round"
+}));
+
+// Right leg
+const hLegR = add(gHuman, el("line", {
+  x1: "0", y1: "5",
+  x2: "9", y2: "20",
+  stroke: "#cc1010", "stroke-width": "3", "stroke-linecap": "round"
+}));
+
+// ── Death particles ────────────────────────────────────────────────────────
+// 6 small red dots that fly outward when the human is eaten
+const PARTICLE_COUNT = 6;
+const particles = [];
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  const pc = add(gTarget, el("circle", {
+    r: "4", fill: "#ff3322", opacity: "0"
+  }));
+  particles.push({ el: pc, vx: 0, vy: 0, x: 0, y: 0, life: 0 });
+}
+
+// ── Target state ───────────────────────────────────────────────────────────
+const target = { x: 0, y: 0 };
+
+// isDying = true while the death animation is playing (blocks new collisions)
+let isDying = false;
+
+// Death animation state
+let deathProgress = 0;   // 0 → 1 over DEATH_DURATION ms
+let deathStartTime = 0;
+const DEATH_DURATION = 500;   // ms the death animation lasts
+
+// ── Position the human figure at (x, y) ────────────────────────────────────
+function placeHuman(x, y) {
+  target.x = x;
+  target.y = y;
+  // Move the whole group via transform
+  gHuman.setAttribute("transform", `translate(${x.toFixed(1)},${y.toFixed(1)})`);
+  // Make sure it's fully visible and upright
+  gHuman.setAttribute("opacity", "1");
+}
+
+// ── Pick a new random position within screen bounds ─────────────────────────
+function randomPos() {
+  return {
+    x: MARGIN + Math.random() * (W - MARGIN * 2),
+    y: MARGIN + Math.random() * (H - MARGIN * 2)
+  };
+}
+
+// ── Spawn the human (show figure, hide particles) ───────────────────────────
+function spawnHuman() {
+  isDying = false;
+  const pos = randomPos();
+  placeHuman(pos.x, pos.y);
+  // Reset all particles to invisible
+  particles.forEach(p => {
+    p.el.setAttribute("opacity", "0");
+    p.life = 0;
+  });
+}
+
+// Initial spawn
+spawnHuman();
+
+// ── Auto-reposition every 500 ms (only when alive) ─────────────────────────
+let autoMoveTimer = null;
+function scheduleAutoMove() {
+  clearTimeout(autoMoveTimer);
+  autoMoveTimer = setTimeout(() => {
+    if (!isDying) {
+      const pos = randomPos();
+      placeHuman(pos.x, pos.y);
+    }
+    scheduleAutoMove();   // keep cycling every 500ms
+  }, 500);
+}
+scheduleAutoMove();
+
+// ── Trigger death animation at position (dx, dy) ───────────────────────────
+function triggerDeath(dx, dy) {
+  isDying      = true;
+  deathProgress = 0;
+  deathStartTime = performance.now();
+
+  // Launch particles in all directions
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const angle = (i / PARTICLE_COUNT) * Math.PI * 2;
+    const speed = 3 + Math.random() * 3;
+    particles[i].x    = dx;
+    particles[i].y    = dy;
+    particles[i].vx   = Math.cos(angle) * speed;
+    particles[i].vy   = Math.sin(angle) * speed;
+    particles[i].life = 1;   // fully alive
+    particles[i].el.setAttribute("cx", dx.toFixed(1));
+    particles[i].el.setAttribute("cy", dy.toFixed(1));
+    particles[i].el.setAttribute("opacity", "1");
+  }
+}
+
+// ── Update death animation each frame ──────────────────────────────────────
+// Call this inside tick(). Returns true when animation has finished.
+function updateDeath(now) {
+  const elapsed = now - deathStartTime;
+  const t = Math.min(elapsed / DEATH_DURATION, 1);   // 0 → 1
+
+  // Human figure: spin + fall + fade
+  const angle   = t * 180;           // rotate up to 180°
+  const fallY   = t * 30;            // drop downward
+  const opacity = 1 - t;             // fade out
+  gHuman.setAttribute("opacity", opacity.toFixed(3));
+  gHuman.setAttribute("transform",
+    `translate(${target.x.toFixed(1)},${(target.y + fallY).toFixed(1)}) rotate(${angle.toFixed(1)})`
+  );
+
+  // Particles: drift outward, shrink, fade
+  particles.forEach(p => {
+    if (p.life <= 0) return;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.25;          // gravity on particles
+    p.life = 1 - t;
+    p.el.setAttribute("cx", p.x.toFixed(1));
+    p.el.setAttribute("cy", p.y.toFixed(1));
+    p.el.setAttribute("opacity", p.life.toFixed(3));
+    const r = Math.max(0, 4 * p.life);
+    p.el.setAttribute("r", r.toFixed(2));
+  });
+
+  // Animation finished → spawn new human
+  if (t >= 1) {
+    spawnHuman();
+    scheduleAutoMove();   // reset the 500ms cycle
+    return true;
+  }
+  return false;
+}
+
+// ── COLLISION DETECTION ────────────────────────────────────────────────────
+function checkCollision() {
+  if (isDying) return;   // already dead, wait for animation to finish
+
+  const hx  = spine[0].x;
+  const hy  = spine[0].y;
+  const dx  = hx - target.x;
+  const dy  = hy - target.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  if (dist < HEAD_R + TARGET_R) {
+    // HIT!
+    score += 1;
+    updateScoreDisplay();
+    clearTimeout(autoMoveTimer);   // pause auto-move during death
+    triggerDeath(target.x, target.y);
+  }
+}
+
+// ── CRESCENT VERTEBRAE ─────────────────────────────────────────────────────
+// Each vertebra is a crescent/chevron: two curved horns pointing backward
+// Created as a filled SVG path, updated each frame with transform
+
+const BODY_END = 48;   // where body ends and tail begins
+
+// Pre-create vertebra paths
+const vertPaths = [];
+for (let i = 1; i < SPINE_N; i++) {
+  const p = add(gBones, el("path", { "stroke": "none" }));
+  vertPaths.push({ p, idx: i });
+}
+
+// ── FIN STROKES ────────────────────────────────────────────────────────────
+// Many thin lines radiating from mid-body, sweeping backward like feathers.
+// Each body segment spawns multiple fine strokes per side.
+// We pre-create them all.
+
+const FIN_START = 2;
+const FIN_END   = BODY_END;
+const STROKES_PER_SEG = 6;   // fan of fine lines per segment per side
+
+const finLines = [];
+for (let i = FIN_START; i < FIN_END; i++) {
+  for (let s = 0; s < STROKES_PER_SEG; s++) {
+    const lL = add(gFins, el("line", { "stroke-linecap": "round" }));
+    const lR = add(gFins, el("line", { "stroke-linecap": "round" }));
+    finLines.push({ lL, lR, segIdx: i, strokeIdx: s });
+  }
+}
+
+// ── HEAD ───────────────────────────────────────────────────────────────────
+// Small solid black fish/bird head: rounded body + two backward swept wings
+const headPath  = add(gHead, el("path", { fill: "#0a0a0a", stroke: "none" }));
+const headWingL = add(gHead, el("path", { fill: "#111", stroke: "none" }));
+const headWingR = add(gHead, el("path", { fill: "#111", stroke: "none" }));
+// small white eye highlight
+const headEye   = add(gHead, el("circle", { r: "2.5", fill: "rgba(255,255,255,0.7)" }));
+
+// ── CRESCENT PATH BUILDER ──────────────────────────────────────────────────
+// Draws a crescent pointing backward (horns swept back relative to fwd dir)
+// cx,cy = center, angle = forward direction, size = scale factor
+function crescentPath(cx, cy, angle, size) {
+  const f  = angle;           // forward direction
+  const b  = angle + Math.PI; // backward
+  const r  = angle + Math.PI / 2;
+  const l  = angle - Math.PI / 2;
+
+  // The crescent shape: a filled rounded body with two backward curved horns
+  // Body center slightly forward
+  const bx = cx + Math.cos(f) * size * 0.3;
+  const by = cy + Math.sin(f) * size * 0.3;
+
+  // Width across the body
+  const hw = size * 1.1;
+
+  // Left horn tip — sweeps back-left
+  const ltx = cx + Math.cos(b) * size * 0.9 + Math.cos(l) * size * 0.5;
+  const lty = cy + Math.sin(b) * size * 0.9 + Math.sin(l) * size * 0.5;
+  // Right horn tip — sweeps back-right
+  const rtx = cx + Math.cos(b) * size * 0.9 + Math.cos(r) * size * 0.5;
+  const rty = cy + Math.sin(b) * size * 0.9 + Math.sin(r) * size * 0.5;
+
+  // Left body edge
+  const lbx = bx + Math.cos(l) * hw;
+  const lby = by + Math.sin(l) * hw;
+  // Right body edge
+  const rbx = bx + Math.cos(r) * hw;
+  const rby = by + Math.sin(r) * hw;
+
+  // Front tip
+  const ftx = cx + Math.cos(f) * size * 0.7;
+  const fty = cy + Math.sin(f) * size * 0.7;
+
+  // Control points for smooth curves
+  // Left arc: from front-tip → left-body → left-horn-tip
+  // Right arc: mirror
+
+  return `M ${ftx.toFixed(2)} ${fty.toFixed(2)}
+    C ${(ftx + Math.cos(l)*hw*0.8).toFixed(2)} ${(fty + Math.sin(l)*hw*0.8).toFixed(2)},
+      ${lbx.toFixed(2)} ${lby.toFixed(2)},
+      ${ltx.toFixed(2)} ${lty.toFixed(2)}
+    Q ${(cx + Math.cos(b)*size*0.3).toFixed(2)} ${(cy + Math.sin(b)*size*0.3).toFixed(2)},
+      ${rtx.toFixed(2)} ${rty.toFixed(2)}
+    C ${rbx.toFixed(2)} ${rby.toFixed(2)},
+      ${(ftx + Math.cos(r)*hw*0.8).toFixed(2)} ${(fty + Math.sin(r)*hw*0.8).toFixed(2)},
+      ${ftx.toFixed(2)} ${fty.toFixed(2)} Z`;
+}
+
+// ── HEAD PATH BUILDER ──────────────────────────────────────────────────────
+function updateHead(hx, hy, angle) {
+  const fx = Math.cos(angle), fy = Math.sin(angle);
+  const rx = Math.cos(angle + Math.PI / 2), ry = Math.sin(angle + Math.PI / 2);
+  const bx = Math.cos(angle + Math.PI),    by = Math.sin(angle + Math.PI);
+
+  // Main head body: small rounded teardrop pointing forward
+  const tipX  = hx + fx * 18,     tipY  = hy + fy * 18;
+  const backX = hx + bx * 8,      backY = hy + by * 8;
+  const lmX   = hx + rx * 9  + fx * 3, lmY = hy + ry * 9  + fy * 3;
+  const rmX   = hx - rx * 9  + fx * 3, rmY = hy - ry * 9  + fy * 3;
+
+  headPath.setAttribute("d", `
+    M ${tipX.toFixed(1)} ${tipY.toFixed(1)}
+    C ${lmX.toFixed(1)} ${lmY.toFixed(1)}, ${(hx+rx*10-fx*2).toFixed(1)} ${(hy+ry*10-fy*2).toFixed(1)}, ${backX.toFixed(1)} ${backY.toFixed(1)}
+    C ${(hx-rx*10-fx*2).toFixed(1)} ${(hy-ry*10-fy*2).toFixed(1)}, ${rmX.toFixed(1)} ${rmY.toFixed(1)}, ${tipX.toFixed(1)} ${tipY.toFixed(1)} Z
+  `);
+
+  // Left wing: thin swept-back crescent wing
+  const wlBase1 = [hx + rx * 7 - fx * 2,  hy + ry * 7 - fy * 2];
+  const wlBase2 = [hx + rx * 3 - fx * 5,  hy + ry * 3 - fy * 5];
+  const wlTip   = [hx + rx * 14 + bx * 18, hy + ry * 14 + by * 18];
+  headWingL.setAttribute("d", `
+    M ${wlBase1[0].toFixed(1)} ${wlBase1[1].toFixed(1)}
+    Q ${(hx+rx*18+bx*6).toFixed(1)} ${(hy+ry*18+by*6).toFixed(1)},
+      ${wlTip[0].toFixed(1)} ${wlTip[1].toFixed(1)}
+    L ${wlBase2[0].toFixed(1)} ${wlBase2[1].toFixed(1)} Z
+  `);
+
+  // Right wing (mirror)
+  const wrBase1 = [hx - rx * 7 - fx * 2,  hy - ry * 7 - fy * 2];
+  const wrBase2 = [hx - rx * 3 - fx * 5,  hy - ry * 3 - fy * 5];
+  const wrTip   = [hx - rx * 14 + bx * 18, hy - ry * 14 + by * 18];
+  headWingR.setAttribute("d", `
+    M ${wrBase1[0].toFixed(1)} ${wrBase1[1].toFixed(1)}
+    Q ${(hx-rx*18+bx*6).toFixed(1)} ${(hy-ry*18+by*6).toFixed(1)},
+      ${wrTip[0].toFixed(1)} ${wrTip[1].toFixed(1)}
+    L ${wrBase2[0].toFixed(1)} ${wrBase2[1].toFixed(1)} Z
+  `);
+
+  // Eye: small white dot slightly forward on head
+  const ex = hx + fx * 8 + rx * 3;
+  const ey = hy + fy * 8 + ry * 3;
+  headEye.setAttribute("cx", ex.toFixed(1));
+  headEye.setAttribute("cy", ey.toFixed(1));
+}
+
+// ── ANIMATION LOOP ─────────────────────────────────────────────────────────
+function tick(now) {
+  requestAnimationFrame(tick);
+
+  // ── Update spine positions ──
+  const dx = ptr.x - spine[0].x;
+  const dy = ptr.y - spine[0].y;
+  const d  = Math.sqrt(dx * dx + dy * dy);
+  if (d > 1) {
+    const spd = Math.min(d * 0.19, 20);
+    spine[0].a = Math.atan2(dy, dx);
+    spine[0].x += Math.cos(spine[0].a) * spd;
+    spine[0].y += Math.sin(spine[0].a) * spd;
+  }
+  for (let i = 1; i < SPINE_N; i++) {
+    const px = spine[i - 1].x, py = spine[i - 1].y;
+    const ddx = px - spine[i].x, ddy = py - spine[i].y;
+    const dd  = Math.sqrt(ddx * ddx + ddy * ddy);
+    if (dd > SPINE_D) {
+      spine[i].a = Math.atan2(ddy, ddx);
+      spine[i].x = px - Math.cos(spine[i].a) * SPINE_D;
+      spine[i].y = py - Math.sin(spine[i].a) * SPINE_D;
+    }
+  }
+
+  // ── Draw vertebrae crescents ──
+  for (const { p, idx } of vertPaths) {
+    const seg = spine[idx];
+    const t   = idx / SPINE_N;
+    const isTail = idx >= BODY_END;
+
+    if (isTail) {
+      // Tail: smaller crescents, fading, lighter color
+      const tt    = (idx - BODY_END) / (SPINE_N - BODY_END);
+      const size  = lerp(5.5, 1.2, tt);
+      const alpha = lerp(0.55, 0.08, tt);
+      p.setAttribute("d", crescentPath(seg.x, seg.y, seg.a, size));
+      p.setAttribute("fill", `rgba(80,72,62,${alpha.toFixed(2)})`);
+    } else {
+      // Body: bell-curved size, darkest in mid-body
+      const bk    = bell(t, 0.30);
+      const size  = lerp(5, 13, bk);
+      // Color: near-black at head, dark gray in body
+      const gray  = Math.round(lerp(10, 70, t));
+      const alpha = lerp(0.95, 0.80, t);
+      p.setAttribute("d", crescentPath(seg.x, seg.y, seg.a, size));
+      p.setAttribute("fill", `rgba(${gray},${gray-4},${gray-8},${alpha.toFixed(2)})`);
+    }
+  }
+
+  // ── Draw fin strokes ──
+  // Fine hair-like strokes fan outward from spine, sweeping backward
+  // Number of strokes and their length follows bell curve
+
+  for (const { lL, lR, segIdx, strokeIdx } of finLines) {
+    const seg = spine[segIdx];
+    const t   = segIdx / SPINE_N;
+    const bk  = bell(t, 0.32);
+
+    // How many active strokes this segment gets (all 6 only in peak area)
+    const activeCount = Math.round(lerp(1, STROKES_PER_SEG, bk));
+
+    if (strokeIdx >= activeCount) {
+      lL.setAttribute("stroke-width", "0");
+      lR.setAttribute("stroke-width", "0");
+      continue;
+    }
+
+    // Each stroke fans out at a slightly different angle from perpendicular
+    // strokeIdx 0 = closest to perpendicular, last = most swept back
+    const fanRatio  = strokeIdx / (STROKES_PER_SEG - 1);  // 0..1
+    const maxFanLen = lerp(20, 110, bk);
+
+    // Stroke angle: perpendicular + swept backward by fanRatio
+    // Fan sweeps from ~80° offset to ~160° offset from forward direction
+    const sweepAngleL = seg.a + Math.PI / 2  + lerp(0.3, 1.45, fanRatio);
+    const sweepAngleR = seg.a - Math.PI / 2  - lerp(0.3, 1.45, fanRatio);
+
+    // Stroke length: shorter at root, longer as fan opens
+    const strokeLen = lerp(maxFanLen * 0.3, maxFanLen, fanRatio);
+
+    // Root offset from spine — each stroke starts slightly out from center
+    const rootOffset = lerp(3, lerp(8, 14, bk), fanRatio * 0.5);
+
+    const alpha = lerp(0.55, 0.12, fanRatio) * lerp(0.3, 1.0, bk);
+    const sw    = lerp(1.2, 0.4, fanRatio);
+
+    // Left side
+    const lrootX = seg.x + Math.cos(seg.a + Math.PI / 2) * rootOffset;
+    const lrootY = seg.y + Math.sin(seg.a + Math.PI / 2) * rootOffset;
+    lL.setAttribute("x1", lrootX.toFixed(1));
+    lL.setAttribute("y1", lrootY.toFixed(1));
+    lL.setAttribute("x2", (lrootX + Math.cos(sweepAngleL) * strokeLen).toFixed(1));
+    lL.setAttribute("y2", (lrootY + Math.sin(sweepAngleL) * strokeLen).toFixed(1));
+    lL.setAttribute("stroke", `rgba(38,32,24,${alpha.toFixed(2)})`);
+    lL.setAttribute("stroke-width", sw.toFixed(2));
+
+    // Right side
+    const rrootX = seg.x + Math.cos(seg.a - Math.PI / 2) * rootOffset;
+    const rrootY = seg.y + Math.sin(seg.a - Math.PI / 2) * rootOffset;
+    lR.setAttribute("x1", rrootX.toFixed(1));
+    lR.setAttribute("y1", rrootY.toFixed(1));
+    lR.setAttribute("x2", (rrootX + Math.cos(sweepAngleR) * strokeLen).toFixed(1));
+    lR.setAttribute("y2", (rrootY + Math.sin(sweepAngleR) * strokeLen).toFixed(1));
+    lR.setAttribute("stroke", `rgba(38,32,24,${alpha.toFixed(2)})`);
+    lR.setAttribute("stroke-width", sw.toFixed(2));
+  }
+
+  // ── Draw head ──
+  updateHead(spine[0].x, spine[0].y, spine[0].a);
+
+  // ── Death animation (runs while human is dying) ──
+  if (isDying) updateDeath(now);
+
+  // ── Check if dragon head ate the human ──
+  checkCollision();
+}
+
+tick();
+</script>
+</body>
+</html>
