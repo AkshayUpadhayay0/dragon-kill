@@ -2,12 +2,22 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Dragon Cursor</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #d8d4cc; cursor: none; }
-  svg#screen { display: block; width: 100vw; height: 100vh; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #d8d4cc; cursor: none;
+    /* Prevent browser from intercepting touch gestures (pan, zoom) */
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    overscroll-behavior: none;
+  }
+  svg#screen {
+    display: block; width: 100vw; height: 100vh;
+    touch-action: none;   /* belt-and-suspenders for the SVG itself */
+  }
 
   /* ── HUD: score + timer pills (top-left / top-right) ── */
   #score-display, #timer-display {
@@ -152,9 +162,32 @@ window.addEventListener("resize", () => {
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
 });
 
-// ── pointer ────────────────────────────────────────────────────────────────
+// ── pointer / touch tracking ───────────────────────────────────────────────
+// We listen to BOTH pointermove (desktop + stylus) AND touchmove (mobile).
+// preventDefault() on touchmove stops the browser from panning/zooming
+// while the player is dragging their thumb — that was causing the shaking.
 const ptr = { x: W / 2, y: H / 2 };
-window.addEventListener("pointermove", e => { ptr.x = e.clientX; ptr.y = e.clientY; });
+
+window.addEventListener("pointermove", e => {
+  ptr.x = e.clientX;
+  ptr.y = e.clientY;
+});
+
+// touchmove with { passive: false } so we can call preventDefault()
+window.addEventListener("touchmove", e => {
+  e.preventDefault();                          // ← kills the browser shake
+  const t = e.touches[0];
+  ptr.x = t.clientX;
+  ptr.y = t.clientY;
+}, { passive: false });
+
+// touchstart: snap dragon target to finger immediately on first tap
+window.addEventListener("touchstart", e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  ptr.x = t.clientX;
+  ptr.y = t.clientY;
+}, { passive: false });
 
 // ── spine parameters ───────────────────────────────────────────────────────
 const SPINE_N = 60;   // total vertebrae count
