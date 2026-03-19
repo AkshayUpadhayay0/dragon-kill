@@ -9,30 +9,122 @@
   html, body { width: 100%; height: 100%; overflow: hidden; background: #d8d4cc; cursor: none; }
   svg#screen { display: block; width: 100vw; height: 100vh; }
 
-  /* ── SCORE DISPLAY ── */
-  #score-display {
+  /* ── HUD: score + timer pills (top-left / top-right) ── */
+  #score-display, #timer-display {
     position: fixed;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
+    top: 16px;
     font-family: 'Courier New', Courier, monospace;
-    font-size: 28px;
+    font-size: 15px;          /* smaller, less dominant */
     font-weight: bold;
     color: #2a2018;
-    letter-spacing: 4px;
-    background: rgba(214, 209, 199, 0.75);
-    padding: 8px 28px;
-    border-radius: 40px;
-    border: 2px solid rgba(42, 32, 24, 0.18);
-    pointer-events: none;        /* never blocks mouse */
+    letter-spacing: 2px;
+    background: rgba(214, 209, 199, 0.78);
+    padding: 5px 16px;
+    border-radius: 30px;
+    border: 1.5px solid rgba(42, 32, 24, 0.15);
+    pointer-events: none;
     user-select: none;
     z-index: 10;
+  }
+  #score-display { left: 16px; }
+  #timer-display { right: 16px; }
+  /* Timer turns red when ≤ 10 seconds */
+  #timer-display.urgent { color: #c01010; border-color: rgba(192,16,16,0.35); }
+
+  /* ── OVERLAY (welcome + game-over share the same base) ── */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(216, 212, 204, 0.93);
+    backdrop-filter: blur(6px);
+    z-index: 100;
+    /* fade in/out */
+    opacity: 1;
+    transition: opacity 0.4s ease;
+  }
+  .overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .overlay h1 {
+    font-family: 'Georgia', serif;
+    font-size: clamp(22px, 4vw, 42px);
+    color: #1e1810;
+    text-align: center;
+    line-height: 1.4;
+    margin-bottom: 14px;
+    max-width: 560px;
+    padding: 0 20px;
+  }
+  .overlay p {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: clamp(13px, 2vw, 17px);
+    color: #4a3e2e;
+    text-align: center;
+    margin-bottom: 32px;
+    max-width: 460px;
+    padding: 0 20px;
+    line-height: 1.6;
+  }
+  /* Dragon decorative line under title */
+  .overlay .divider {
+    width: 80px; height: 2px;
+    background: linear-gradient(90deg, transparent, #2a2018, transparent);
+    margin: 0 auto 28px;
+  }
+  /* Shared button style */
+  .overlay button {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: #d8d4cc;
+    background: #2a2018;
+    border: none;
+    border-radius: 40px;
+    padding: 12px 40px;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.15s;
+  }
+  .overlay button:hover  { background: #4a3828; transform: scale(1.04); }
+  .overlay button:active { transform: scale(0.97); }
+
+  /* Game-over score highlight */
+  #gameover-score {
+    font-family: 'Georgia', serif;
+    font-size: clamp(36px, 7vw, 72px);
+    color: #2a2018;
+    margin-bottom: 6px;
+    letter-spacing: 4px;
   }
 </style>
 </head>
 <body>
-<!-- ── SCORE DISPLAY (sits above SVG) ── -->
-<div id="score-display">Score - 000</div>
+<!-- ══ WELCOME SCREEN ══ -->
+<div id="welcome-overlay" class="overlay">
+  <h1>🐉 Dragon Kill Game</h1>
+  <div class="divider"></div>
+  <p>You have <strong>60 seconds</strong> to hunt as many humans as possible.<br>Move your mouse — the dragon follows!</p>
+  <button id="btn-start">START GAME</button>
+</div>
+
+<!-- ══ GAME OVER SCREEN ══ -->
+<div id="gameover-overlay" class="overlay hidden">
+  <h1>GAME OVER</h1>
+  <div class="divider"></div>
+  <p>Your final score</p>
+  <div id="gameover-score">000</div>
+  <p style="margin-top:8px; margin-bottom:32px; font-size:13px; opacity:0.6;">humans devoured</p>
+  <button id="btn-restart">PLAY AGAIN</button>
+</div>
+
+<!-- ══ HUD ══ -->
+<div id="score-display">Score — 000</div>
+<div id="timer-display">Time — 60</div>
 
 <svg id="screen" xmlns="http://www.w3.org/2000/svg"></svg>
 <script>
@@ -79,15 +171,86 @@ const gFins  = add(svg, el("g", {}));   // long feathery fin strokes (background
 const gBones = add(svg, el("g", {}));   // crescent vertebrae shapes
 const gHead  = add(svg, el("g", {}));   // head
 
-// ── SCORE ──────────────────────────────────────────────────────────────────
-// Keeps track of how many targets the dragon head has eaten.
-let score = 0;
-const scoreEl = document.getElementById("score-display");
+// ══════════════════════════════════════════════════════════════════════════════
+// GAME STATE
+// Possible states: "welcome" | "playing" | "gameover"
+// The tick() loop always runs (so the dragon animates on overlays too),
+// but human spawning / collision / timer only run while state === "playing".
+// ══════════════════════════════════════════════════════════════════════════════
+let gameState = "welcome";   // start on the welcome screen
 
-// Pad score to always show 3 digits: 0 → "000", 7 → "007", 42 → "042"
+// ── Score ──────────────────────────────────────────────────────────────────
+let score = 0;
+const scoreEl   = document.getElementById("score-display");
+const timerEl   = document.getElementById("timer-display");
+const goOverlay = document.getElementById("gameover-overlay");
+const goScore   = document.getElementById("gameover-score");
+const wlOverlay = document.getElementById("welcome-overlay");
+
+function pad3(n) { return String(n).padStart(3, "0"); }
+
 function updateScoreDisplay() {
-  scoreEl.textContent = "Score - " + String(score).padStart(3, "0");
+  scoreEl.textContent = "Score — " + pad3(score);
 }
+
+// ── Countdown timer ────────────────────────────────────────────────────────
+const GAME_DURATION = 60;   // seconds
+let timeLeft        = GAME_DURATION;
+let timerInterval   = null;
+
+function updateTimerDisplay() {
+  timerEl.textContent = "Time — " + timeLeft;
+  // Turn red when ≤ 10 seconds remain
+  timerEl.classList.toggle("urgent", timeLeft <= 10);
+}
+
+function startTimer() {
+  clearInterval(timerInterval);
+  timeLeft = GAME_DURATION;
+  updateTimerDisplay();
+  timerInterval = setInterval(() => {
+    if (gameState !== "playing") return;
+    timeLeft--;
+    updateTimerDisplay();
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      endGame();
+    }
+  }, 1000);
+}
+
+// ── Game flow ──────────────────────────────────────────────────────────────
+function startGame() {
+  score     = 0;
+  gameState = "playing";
+  updateScoreDisplay();
+  // Hide overlays
+  wlOverlay.classList.add("hidden");
+  goOverlay.classList.add("hidden");
+  // Spawn human & start timer
+  spawnHuman();
+  scheduleAutoMove();
+  startTimer();
+}
+
+function endGame() {
+  gameState = "gameover";
+  clearTimeout(autoMoveTimer);
+  // Hide human figure during game over
+  gHuman.setAttribute("opacity", "0");
+  particles.forEach(p => p.el.setAttribute("opacity", "0"));
+  // Show game-over overlay
+  goScore.textContent = pad3(score);
+  goOverlay.classList.remove("hidden");
+}
+
+// ── Button listeners ────────────────────────────────────────────────────────
+document.getElementById("btn-start").addEventListener("click", startGame);
+document.getElementById("btn-restart").addEventListener("click", () => {
+  // Briefly fade out the overlay, then restart
+  goOverlay.classList.add("hidden");
+  setTimeout(startGame, 420);   // wait for CSS fade-out (0.4s)
+});
 
 // ── HUMAN TARGET ───────────────────────────────────────────────────────────
 // A small red stick-figure human. When the dragon head touches it:
@@ -198,22 +361,22 @@ function spawnHuman() {
   });
 }
 
-// Initial spawn
-spawnHuman();
+// Do NOT auto-spawn on load — wait for startGame() to call spawnHuman()
+// (We hide the human initially so it doesn't show on the welcome screen)
+gHuman.setAttribute("opacity", "0");
 
-// ── Auto-reposition every 500 ms (only when alive) ─────────────────────────
+// Auto-move timer — started by startGame(), not on load
 let autoMoveTimer = null;
 function scheduleAutoMove() {
   clearTimeout(autoMoveTimer);
   autoMoveTimer = setTimeout(() => {
-    if (!isDying) {
+    if (gameState === "playing" && !isDying) {
       const pos = randomPos();
       placeHuman(pos.x, pos.y);
     }
-    scheduleAutoMove();   // keep cycling every 500ms
+    if (gameState === "playing") scheduleAutoMove();
   }, 500);
 }
-scheduleAutoMove();
 
 // ── Trigger death animation at position (dx, dy) ───────────────────────────
 function triggerDeath(dx, dy) {
@@ -276,7 +439,8 @@ function updateDeath(now) {
 
 // ── COLLISION DETECTION ────────────────────────────────────────────────────
 function checkCollision() {
-  if (isDying) return;   // already dead, wait for animation to finish
+  if (gameState !== "playing") return;   // only collide during active game
+  if (isDying) return;                   // already dead, wait for animation
 
   const hx  = spine[0].x;
   const hy  = spine[0].y;
@@ -288,7 +452,7 @@ function checkCollision() {
     // HIT!
     score += 1;
     updateScoreDisplay();
-    clearTimeout(autoMoveTimer);   // pause auto-move during death
+    clearTimeout(autoMoveTimer);
     triggerDeath(target.x, target.y);
   }
 }
