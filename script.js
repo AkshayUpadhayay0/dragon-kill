@@ -250,7 +250,7 @@ function scheduleAutoMove() {
       placeHuman(pos.x, pos.y);
     }
     if (gameState === "playing") scheduleAutoMove();
-  }, 800);
+  }, 1000);
 }
 
 function triggerDeath(dx, dy) {
@@ -320,8 +320,8 @@ function tick(now) {
 
   // Head follows pointer
   let e = elems[0];
-  e.x += (pointer.x - e.x) / 10;
-  e.y += (pointer.y - e.y) / 10;
+  e.x += (pointer.x - e.x) / 5;
+  e.y += (pointer.y - e.y) / 5;
 
   // Body + tail
   for (let i = 1; i < N; i++) {
@@ -330,8 +330,8 @@ function tick(now) {
     const a = Math.atan2(e.y - ep.y, e.x - ep.x);
 
     // spacing
-    e.x += (ep.x - e.x + (Math.cos(a) * (90 - i)) / 5) / 4;
-    e.y += (ep.y - e.y + (Math.sin(a) * (90 - i)) / 5) / 4;
+    e.x += (ep.x - e.x + (Math.cos(a) * (90 - i)) / 6) / 3;
+    e.y += (ep.y - e.y + (Math.sin(a) * (90 - i)) / 6) / 3;
 
     // Scale: starts smaller and tapers more toward the tail
     let s = (150 + 3 * (1 - i)) / 95;
